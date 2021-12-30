@@ -1,0 +1,36 @@
+from datetime import datetime
+import json
+
+connectionString = dbutils.secrets.get(scope = 'keyvault-secret', key = 'eventhub-connection-string')
+conf = {}
+
+conf['eventhubs.connectionString'] = sc._jvm.org.apache.spark.eventhubs.EventHubsUtils.encrypt(connectionString)
+
+from datetime import datetime, timedelta
+startTime = datetime.now() - timedelta(minutes = 30)
+startTime=startTime.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+startingEventPosition = {"offset":None, "seqNo": -1, "enqueuedTime": startTime,"isInclusive": True}
+conf["eventhubs.startingPosition"] = json.dumps(startingEventPosition)
+from pyspark.sql.types import StructType, ArrayType, StructField, StringType, IntegerType, LongType, DoubleType
+
+df = spark.readStream.format("eventhubs").options(**conf).load()
+
+df.createOrReplaceTempView("avgdelay")
+
+schema=StructType([
+StructField('LastUpdateData',StringType(),True),StructField('Vehicles',ArrayType(StructType([StructField('DataGenerated',StringType(),True),StructField('Delay',LongType(),True),StructField('GPSQuality',LongType(),True),StructField('Lat',DoubleType(),True),StructField('Line',StringType(),True),StructField('Lon',DoubleType(),True),StructField('Route',StringType(),True),StructField('Speed',LongType(),True),StructField('VehicleCode',StringType(),True),StructField('VehicleId',LongType(),True),StructField('VehicleService',StringType(),True)])),True)])
+
+import  pyspark.sql.functions as F
+df=df.select(F.from_json(F.col("body").cast("string"), schema).alias("streaming_df"))
+from pyspark.sql.functions import explode
+streamingdf = df.select('streaming_df.*')
+
+avg_delay=streamingdf.select(streamingdf.LastUpdateData,explode(streamingdf.Vehicles)).select('LastUpdateData','Col.*').where("Delay IS NOT NULL").agg({"DataGenerated":"min", "Delay":"avg"}).writeStream.queryName("avgdelay").format("memory").outputMode('complete').start()
+
+spark.sql("SELECT * FROM avgdelay").show()
+
+test=spark.sql("SELECT * FROM avgdelay").cache()
+test.show()
+
+for s in spark.streams.active:
+    s.stop()
